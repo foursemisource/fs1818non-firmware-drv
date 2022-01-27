@@ -45,7 +45,6 @@
 
 static DEFINE_MUTEX(g_fsm_mutex);
 
-static int freq_sysclk;
 static int fsm_dev_count;
 static const unsigned int fsm_rates[] = { 8000, 16000, 32000, 44100, 48000 };
 static const struct snd_pcm_hw_constraint_list fsm_constraints = {
@@ -53,15 +52,20 @@ static const struct snd_pcm_hw_constraint_list fsm_constraints = {
 	.count = ARRAY_SIZE(fsm_rates),
 };
 
-const static struct fsm_pll_config g_fs1801_pll_tbl[] = {
+const static struct fsm_pll_config g_fs1818_pll_tbl[] = {
 	/* bclk,    0xC1,   0xC2,   0xC3 */
 	{  256000, 0x01A0, 0x0180, 0x0001 }, //  8000*16*2
+	{  384000, 0x0260, 0x0100, 0x0001 }, //  8000*24*2
 	{  512000, 0x01A0, 0x0180, 0x0002 }, // 16000*16*2 &  8000*32*2
+	{  768000, 0x0260, 0x0100, 0x0002 }, // 16000*24*2
 	{ 1024000, 0x0260, 0x0120, 0x0003 }, //            & 16000*32*2
 	{ 1024032, 0x0260, 0x0120, 0x0003 }, // 32000*16*2+32
 	{ 1411200, 0x01A0, 0x0100, 0x0004 }, // 44100*16*2
 	{ 1536000, 0x0260, 0x0100, 0x0004 }, // 48000*16*2
+	{ 1536032, 0x0260, 0x0100, 0x0004 }, // 32000*24*2+32
 	{ 2048032, 0x0260, 0x0120, 0x0006 }, //            & 32000*32*2+32
+	{ 2116800, 0x01A0, 0x0100, 0x0006 }, // 44100*24*2
+	{ 2304000, 0x0260, 0x0100, 0x0006 }, // 48000*24*2
 	{ 2822400, 0x01A0, 0x0100, 0x0008 }, //            & 44100*32*2
 	{ 3072000, 0x0260, 0x0100, 0x0008 }, //            & 48000*32*2
 };
@@ -317,27 +321,58 @@ static int fsm_get_bf(
 	return ret;
 }
 
+int fsm_read_status(struct fsm_dev *fsm_dev, uint8_t reg, uint16_t *pval)
+{
+	uint16_t value = 0;
+	uint16_t old;
+	int count = 0;
+	int ret;
+
+	if (fsm_dev == NULL && pval == NULL)
+		return -EINVAL;
+
+	while (count++ < FSM_I2C_RETRY) {
+		ret = fsm_snd_soc_read(fsm_dev, reg, &value);
+		if (ret)
+			continue;
+		if (count > 1 && old == value)
+			break;
+		old = value;
+	}
+	*pval = value;
+	if (ret)
+		log_err(fsm_dev->dev, "read status:%02X fail:%d", reg, ret);
+
+	return ret;
+}
+
 static int fsm_reg_dump(struct fsm_dev *fsm_dev)
 {
-	char buf[LOG_BUF_SIZE];
-	uint16_t value;
-	int reg_addr;
-	int idx = 0;
-	int ret = 0;
+	uint16_t val[8];
+	uint8_t idx;
+	int ret;
 
 	if (fsm_dev == NULL)
 		return -EINVAL;
 
-	for (reg_addr = 0; reg_addr < 0xD0; reg_addr++) {
-		ret |= fsm_snd_soc_read(fsm_dev, reg_addr, &value);
-		snprintf(buf+idx*8, LOG_BUF_SIZE,
-				"%02X:%04X ", reg_addr, value);
-		idx++;
-		if (idx % 8 == 0) {
-			buf[idx*8-1] = '\0';
-			log_info(fsm_dev->dev, "%s", buf);
-			idx = 0;
+	for (idx = 0; idx < 0xD0; idx += 8) {
+		ret  = fsm_snd_soc_read(fsm_dev, idx, &val[0]);
+		ret |= fsm_snd_soc_read(fsm_dev, idx + 1, &val[1]);
+		ret |= fsm_snd_soc_read(fsm_dev, idx + 2, &val[2]);
+		ret |= fsm_snd_soc_read(fsm_dev, idx + 3, &val[3]);
+		ret |= fsm_snd_soc_read(fsm_dev, idx + 4, &val[4]);
+		ret |= fsm_snd_soc_read(fsm_dev, idx + 5, &val[5]);
+		ret |= fsm_snd_soc_read(fsm_dev, idx + 6, &val[6]);
+		ret |= fsm_snd_soc_read(fsm_dev, idx + 7, &val[7]);
+		if (ret) {
+			log_err(fsm_dev->dev, "dump fail:%d", ret);
+			break;
 		}
+		log_info(fsm_dev->dev,
+			"0x%02X: %04X %04X %04X %04X %04X %04X %04X %04X",
+			idx, val[0], val[1], val[2], val[3],
+			val[4], val[5], val[6], val[7]
+		);
 	}
 
 	return ret;
@@ -393,89 +428,13 @@ static void fsm_append_suffix(struct fsm_dev *fsm_dev, const char **str_name)
 		pr_err("invalid parameters");
 		return;
 	}
-	if (fsm_dev->dev_name == NULL)
+	if (fsm_dev->chn_name == NULL)
 		return;
 
-	snprintf(buf, FSM_STR_MAX, "%s_%s", *str_name, fsm_dev->dev_name);
+	snprintf(buf, FSM_STR_MAX, "%s_%s", *str_name, fsm_dev->chn_name);
 	*str_name = fsm_devm_kstrdup(fsm_dev->dev, buf, strlen(buf));
-	log_debug(fsm_dev->dev, "device name updated:%s", *str_name);
+	log_info(fsm_dev->dev, "device name updated:%s", *str_name);
 }
-
-static int fsm_set_monitor(struct fsm_dev *fsm_dev, bool enable)
-{
-
-	if (fsm_dev == NULL || fsm_dev->fsm_wq == NULL)
-		return -EINVAL;
-
-	if (!fsm_dev->montr_en)
-		return 0;
-
-	if (enable && fsm_dev->amp_on) {
-		queue_delayed_work(fsm_dev->fsm_wq,
-				&fsm_dev->monitor_work, 5*HZ);
-	} else if (!enable) {
-		cancel_delayed_work_sync(&fsm_dev->monitor_work);
-	}
-
-	return 0;
-}
-
-static void fsm_work_monitor(struct work_struct *work)
-{
-	struct fsm_dev *fsm_dev;
-	uint16_t val;
-	int ret;
-	int flag = 0;
-
-	fsm_dev = container_of(work, struct fsm_dev, monitor_work.work);
-	if (fsm_dev == NULL) {
-		pr_err("fsm_dev is null");
-		return;
-	}
-	log_info(fsm_dev->dev, "status monitoring");
-
-	fsm_mutex_lock();
-	ret = fsm_snd_soc_read(fsm_dev, REG(FS1818_STATUS), &val);
-	fsm_mutex_unlock();
-	if (!get_bf_val(FS1818_BOVDS, val)) {
-		log_err(fsm_dev->dev, "boost overvoltage detected");
-		flag = 1;
-	}
-	if (!get_bf_val(FS1818_PLLS, val)) {
-		log_err(fsm_dev->dev, "PLL is not in lock");
-		flag = 1;
-	}
-	if (!get_bf_val(FS1818_OTDS, val)) {
-		log_err(fsm_dev->dev, "overtemperature detected");
-		flag = 1;
-	}
-	if (!get_bf_val(FS1818_OVDS, val)) {
-		log_err(fsm_dev->dev, "overvoltage detected on VBAT");
-		flag = 1;
-	}
-	if (!get_bf_val(FS1818_UVDS, val)) {
-		log_err(fsm_dev->dev, "undervoltage detected on VBAT");
-		flag = 1;
-	}
-	if (get_bf_val(FS1818_OCDS, val)) {
-		log_err(fsm_dev->dev, "overcurrent detected in amplifier");
-		flag = 1;
-	}
-	if (!get_bf_val(FS1818_CLKS, val)) {
-		log_err(fsm_dev->dev, "the ration bclk/ws is not stable");
-		flag = 1;
-	}
-
-	if (flag)
-		fsm_reg_dump(fsm_dev);
-
-	if (fsm_dev->montr_en && fsm_dev->amp_on) {
-		/* reschedule */
-		queue_delayed_work(fsm_dev->fsm_wq, &fsm_dev->monitor_work,
-				2*HZ);
-	}
-}
-
 
 #ifdef CONFIG_REGMAP
 static bool fsm_writeable_register(struct device *dev, uint32_t reg)
@@ -582,6 +541,243 @@ static struct snd_soc_dapm_context *fsm_get_dapm_from_codec(
 #endif
 }
 
+static int fs1818_compat_32k_srate(struct fsm_dev *fsm_dev, int srate)
+{
+	uint16_t anactrl;
+	int ret;
+
+	if (fsm_dev == NULL) {
+		pr_err("fsm_dev is null");
+		return -EINVAL;
+	}
+	anactrl = ((srate == 32000) ? 0x0101 : 0x0100);
+	ret  = fsm_snd_soc_write(fsm_dev, REG(FS1818_OTPACC), 0xCA91);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_ANACTRL), anactrl);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_OTPACC), 0x0000);
+
+	return ret;
+}
+
+static int fs1818_config_pll(struct fsm_dev *fsm_dev, int bclk)
+{
+	int idx;
+	int ret;
+
+	if (fsm_dev == NULL) {
+		pr_err("fsm_dev is null");
+		return -EINVAL;
+	}
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	for (idx = 0; idx < ARRAY_SIZE(g_fs1818_pll_tbl); idx++) {
+		if (g_fs1818_pll_tbl[idx].bclk == bclk)
+			break;
+	}
+	if (idx >= ARRAY_SIZE(g_fs1818_pll_tbl)) {
+		log_err(fsm_dev->dev, "Not found bclk: %d", bclk);
+		return -EINVAL;
+	}
+	ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL1),
+			g_fs1818_pll_tbl[idx].c1);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL2),
+			g_fs1818_pll_tbl[idx].c2);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL3),
+			g_fs1818_pll_tbl[idx].c3);
+
+	return ret;
+}
+
+static int fs1818_power_on(struct fsm_dev *fsm_dev)
+{
+	int ret;
+
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0008);
+	fsm_delay_ms(20);
+
+	return ret;
+}
+
+static int fs1818_power_off(struct fsm_dev *fsm_dev)
+{
+	int ret;
+
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0001);
+	fsm_delay_ms(20);
+
+	return ret;
+}
+
+static int fs1818_set_boost_mode(struct fsm_dev *fsm_dev, int mode)
+{
+	uint16_t bstctrl;
+	int ret;
+
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	ret = fsm_read_status(fsm_dev, REG(FS1818_BSTCTRL), &bstctrl);
+	/* Boost disable */
+	set_bf_val(&bstctrl, FS1818_BSTEN, 0);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+	fsm_delay_ms(20);
+	if (mode > 0) {
+		set_bf_val(&bstctrl, FS1818_BST_MODE, mode);
+		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+		set_bf_val(&bstctrl, FS1818_BSTEN, 1);
+		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+	}
+	fsm_dev->hw_params.boost_mode = mode;
+
+	return ret;
+}
+
+static int fs1818_set_do_output(struct fsm_dev *fsm_dev, int mode)
+{
+	uint16_t i2sctrl;
+	uint16_t i2sset;
+	uint16_t temp;
+	int ret;
+
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	/* Notice:
+	 * both left and right channel is enabled for mono use case.
+	 */
+	ret = fsm_snd_soc_read(fsm_dev, REG(FS1818_I2SCTRL), &i2sctrl);
+	temp = i2sctrl;
+	if (get_bf_val(FS1818_I2SDOE, i2sctrl)) {
+		set_bf_val(&i2sctrl, FS1818_I2SDOE, 0);
+		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_I2SCTRL), i2sctrl);
+		fsm_delay_ms(20);
+	}
+	ret |= fsm_read_status(fsm_dev, REG(FS1818_I2SSET), &i2sset);
+	set_bf_val(&i2sset, FS1818_AECSELL, mode);
+	set_bf_val(&i2sset, FS1818_AECSELR, mode);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_I2SSET), i2sset);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_I2SCTRL), temp);
+	fsm_dev->hw_params.do_type = mode;
+
+	return ret;
+}
+
+static int fs1818_set_mute(struct fsm_dev *fsm_dev, int mute)
+{
+	int ret;
+
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	ret = fsm_set_bf(fsm_dev, FS1818_DACMUTE, mute);
+	if (mute)
+		fsm_delay_ms(20);
+
+	return ret;
+}
+
+static int fs1818_set_fmt(struct fsm_dev *fsm_dev, unsigned int fmt)
+{
+	uint16_t fmt_val;
+	int ret;
+
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	ret = fsm_read_status(fsm_dev, REG(FS1818_I2SSET), &fmt_val);
+
+	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
+	case SND_SOC_DAIFMT_NB_NF:
+		set_bf_val(&fmt_val, FS1818_LRCLKP, 0);
+		set_bf_val(&fmt_val, FS1818_BCLKP, 0);
+		break;
+	case SND_SOC_DAIFMT_NB_IF:
+		set_bf_val(&fmt_val, FS1818_LRCLKP, 1);
+		set_bf_val(&fmt_val, FS1818_BCLKP, 0);
+		break;
+	case SND_SOC_DAIFMT_IB_NF:
+		set_bf_val(&fmt_val, FS1818_LRCLKP, 0);
+		set_bf_val(&fmt_val, FS1818_BCLKP, 1);
+		break;
+	case SND_SOC_DAIFMT_IB_IF:
+		set_bf_val(&fmt_val, FS1818_LRCLKP, 1);
+		set_bf_val(&fmt_val, FS1818_BCLKP, 1);
+		break;
+	default:
+		set_bf_val(&fmt_val, FS1818_LRCLKP, 0);
+		set_bf_val(&fmt_val, FS1818_BCLKP, 0);
+		log_err(fsm_dev->dev, "invalid dai inverse, set to DAIFMT_NB_NF");
+		break;
+	}
+
+	if (fsm_dev->amp_on) {
+		ret |= fs1818_power_off(fsm_dev);
+		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_I2SSET), fmt_val);
+		ret |= fs1818_power_on(fsm_dev);
+	} else
+		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_I2SSET), fmt_val);
+
+	return ret;
+}
+
+static int fs1818_hw_params(struct fsm_dev *fsm_dev)
+{
+	struct fsm_hw_params *fsm_params;
+	uint16_t i2sctrl;
+	int i2ssr;
+	int ret;
+
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	fsm_params = &fsm_dev->hw_params;
+	switch (fsm_params->sample_rate) {
+	case 8000:
+		i2ssr = 0;
+		break;
+	case 16000:
+		i2ssr = 3;
+		break;
+	case 44100:
+		i2ssr = 7;
+		break;
+	case 32000:
+	case 48000:
+		i2ssr = 8;
+		break;
+	default:
+		log_err(fsm_dev->dev, "unsupport rate:%d",
+			fsm_params->sample_rate);
+		return -EINVAL;
+	}
+	// config pll need disable pll firstly
+	ret  = fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0);
+	ret |= fsm_snd_soc_read(fsm_dev, REG(FS1818_I2SCTRL), &i2sctrl);
+	set_bf_val(&i2sctrl, FS1818_I2SSR, i2ssr);
+	set_bf_val(&i2sctrl, FS1818_I2SF, fsm_params->i2s_fmt);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_I2SCTRL), i2sctrl);
+	ret |= fs1818_compat_32k_srate(fsm_dev, fsm_params->sample_rate);
+	ret |= fs1818_config_pll(fsm_dev, fsm_params->freq_bclk);
+
+	return ret;
+}
+
+static int fs1818_feedback_event(struct fsm_dev *fsm_dev, bool enable)
+{
+	int ret;
+
+	ret = fsm_set_bf(fsm_dev, FS1818_I2SDOE, enable);
+	fsm_dev->hw_params.do_enable = enable;
+
+	return ret;
+}
+
 static int fs1818_update_otctrl(struct fsm_dev *fsm_dev)
 {
 	uint16_t otppg1w0;
@@ -613,30 +809,49 @@ static int fs1818_update_otctrl(struct fsm_dev *fsm_dev)
 	return ret;
 }
 
-static int fs1818_dev_init(struct fsm_dev *fsm_dev)
+static int fs1818_i2c_reset(struct fsm_dev *fsm_dev)
 {
 	uint16_t val;
 	int i, ret;
 
-	if (fsm_dev == NULL) {
-		pr_err("fsm_dev is null");
-		return -EINVAL;
-	}
 	for (i = 0; i < FSM_I2C_RETRY; i++) {
 		fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0002);
 		fsm_snd_soc_read(fsm_dev, REG(FS1818_SYSCTRL), &val);
 		fsm_delay_ms(15); // 15ms
 		ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0001);
 		// check init finish flag
-		ret |= fsm_snd_soc_read(fsm_dev, REG(FS1818_CHIPINI), &val);
+		ret |= fsm_read_status(fsm_dev, REG(FS1818_CHIPINI), &val);
 		if ((val == 0x0003) || (val == 0x0300))
 			break;
 	}
-	ret  = fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0000);
+	if (i == FSM_I2C_RETRY) {
+		log_err(fsm_dev->dev, "reset timeout!");
+		return -ETIMEDOUT;
+	}
+
+	return ret;
+}
+
+static int fs1818_dev_init(struct fsm_dev *fsm_dev)
+{
+	uint16_t val;
+	int ret;
+
+	if (fsm_dev == NULL) {
+		pr_err("fsm_dev is null");
+		return -EINVAL;
+	}
+	ret = fs1818_i2c_reset(fsm_dev);
+	if (ret) {
+		log_err(fsm_dev->dev, "i2c reset fail:%d", ret);
+		return ret;
+	}
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0000);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0x000B);
 	fsm_delay_ms(10);
 	ret |= fs1818_update_otctrl(fsm_dev);
-	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_AUDIOCTRL), 0xF300);
+	val  = ((uint16_t)fsm_dev->digi_vol << 8);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_AUDIOCTRL), val);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_DSPCTRL), 0x0802);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_DACCTRL), 0x0310);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_MODCTRL), 0x800A);
@@ -649,52 +864,146 @@ static int fs1818_dev_init(struct fsm_dev *fsm_dev)
 	fsm_delay_ms(10);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0x0000);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_I2SCTRL), 0x801B);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_TEMPSEL), 0x0188);
+	fsm_dev->dev_init = true;
+	if (ret) {
+		fsm_dev->dev_init = false;
+		log_err(fsm_dev->dev, "init fail:%d", ret);
+	}
 
 	return ret;
 }
 
-static int fs1818_compat_32k_srate(struct fsm_dev *fsm_dev, int srate)
+static int fs1818_start_up(struct fsm_dev *fsm_dev, int unmute)
 {
-	uint16_t anactrl;
+	struct fsm_hw_params *fsm_params;
+	uint16_t value;
 	int ret;
 
-	if (fsm_dev == NULL) {
-		pr_err("fsm_dev is null");
-		return -EINVAL;
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	fsm_params = &fsm_dev->hw_params;
+	ret = fsm_read_status(fsm_dev, REG(FS1818_TEMPSEL), &value);
+	if (value == 0x0010) { // default value
+		ret |= fs1818_dev_init(fsm_dev);
+		ret |= fs1818_set_fmt(fsm_dev, fsm_params->dai_fmt);
+		ret |= fs1818_hw_params(fsm_dev);
+		ret |= fs1818_set_boost_mode(fsm_dev, fsm_params->boost_mode);
+		fsm_dev->start_up = false;
 	}
-	anactrl = ((srate == 32000) ? 0x0101 : 0x0100);
-	ret  = fsm_snd_soc_write(fsm_dev, REG(FS1818_OTPACC), 0xCA91);
-	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_ANACTRL), anactrl);
-	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_OTPACC), 0x0000);
+	if (fsm_dev->start_up)
+		return ret;
+
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0x000B);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0008);
+	fsm_dev->start_up = true;
+	if (unmute) {
+		fsm_delay_ms(20);
+		ret |= fs1818_set_mute(fsm_dev, false);
+	}
 
 	return ret;
 }
 
-static int fs1818_config_pll(struct fsm_dev *fsm_dev, int bclk)
+static int fs1818_shut_down(struct fsm_dev *fsm_dev, int mute)
 {
-	int idx;
 	int ret;
 
-	if (fsm_dev == NULL) {
-		pr_err("fsm_dev is null");
-		return -EINVAL;
-	}
-	for (idx = 0; idx < ARRAY_SIZE(g_fs1801_pll_tbl); idx++) {
-		if (g_fs1801_pll_tbl[idx].bclk == bclk)
-			break;
-	}
-	if (idx >= ARRAY_SIZE(g_fs1801_pll_tbl)) {
-		log_err(fsm_dev->dev, "Not found bclk: %d", bclk);
-		return -EINVAL;
-	}
-	ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL1),
-			g_fs1801_pll_tbl[idx].c1);
-	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL2),
-			g_fs1801_pll_tbl[idx].c2);
-	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL3),
-			g_fs1801_pll_tbl[idx].c3);
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	if (mute)
+		ret = fs1818_set_mute(fsm_dev, true);
+
+	ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0001);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0x0000);
+	fsm_dev->start_up = false;
 
 	return ret;
+}
+
+static int fsm_set_monitor(struct fsm_dev *fsm_dev, bool enable)
+{
+
+	if (fsm_dev == NULL || fsm_dev->fsm_wq == NULL)
+		return -EINVAL;
+
+	if (!fsm_dev->dev_init || !fsm_dev->montr_en)
+		return 0;
+
+	if (enable && fsm_dev->amp_on) {
+		queue_delayed_work(fsm_dev->fsm_wq,
+				&fsm_dev->monitor_work, 1*HZ);
+	} else if (!enable) {
+		cancel_delayed_work_sync(&fsm_dev->monitor_work);
+	}
+
+	return 0;
+}
+
+static void fsm_work_monitor(struct work_struct *work)
+{
+	struct fsm_dev *fsm_dev;
+	uint16_t val;
+	int ret;
+	int flag = 0;
+
+	fsm_dev = container_of(work, struct fsm_dev, monitor_work.work);
+	if (fsm_dev == NULL) {
+		pr_err("fsm_dev is null");
+		return;
+	}
+	log_info(fsm_dev->dev, "status monitoring");
+
+	fsm_mutex_lock();
+	ret = fsm_read_status(fsm_dev, REG(FS1818_STATUS), &val);
+	fsm_mutex_unlock();
+	if (ret) {
+		log_err(fsm_dev->dev, "get status fail:%d", ret);
+		return;
+	}
+	if (!get_bf_val(FS1818_BOVDS, val)) {
+		log_err(fsm_dev->dev, "boost overvoltage detected");
+		flag = 1;
+	}
+	if (!get_bf_val(FS1818_PLLS, val)) {
+		log_err(fsm_dev->dev, "PLL is not in lock");
+		flag = 1;
+	}
+	if (!get_bf_val(FS1818_OTDS, val)) {
+		log_err(fsm_dev->dev, "overtemperature detected");
+		flag = 1;
+	}
+	if (!get_bf_val(FS1818_OVDS, val)) {
+		log_err(fsm_dev->dev, "overvoltage detected on VBAT");
+		flag = 1;
+	}
+	if (!get_bf_val(FS1818_UVDS, val)) {
+		log_err(fsm_dev->dev, "undervoltage detected on VBAT");
+		flag = 1;
+	}
+	if (get_bf_val(FS1818_OCDS, val)) {
+		log_err(fsm_dev->dev, "overcurrent detected in amplifier");
+		flag = 1;
+	}
+	if (!get_bf_val(FS1818_CLKS, val)) {
+		log_err(fsm_dev->dev, "the ration bclk/ws is not stable");
+		flag = 1;
+	}
+
+	fsm_mutex_lock();
+	if (flag)
+		fsm_reg_dump(fsm_dev);
+	if (fsm_dev->amp_on)
+		ret |= fs1818_start_up(fsm_dev, 1);
+	fsm_mutex_unlock();
+
+	if (fsm_dev->montr_en && fsm_dev->amp_on) {
+		/* reschedule */
+		queue_delayed_work(fsm_dev->fsm_wq, &fsm_dev->monitor_work,
+				fsm_dev->montr_pd*HZ);
+	}
 }
 
 static int fsm_dac_event(struct snd_soc_dapm_widget *widget,
@@ -709,17 +1018,22 @@ static int fsm_dac_event(struct snd_soc_dapm_widget *widget,
 	}
 	log_debug(fsm_dev->dev, "event:%d", event);
 
+	if (!fsm_dev->dev_init)
+		return 0;
+
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
 		log_info(fsm_dev->dev, "DAC PRE_PMU");
-		ret  = fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0x000B);
-		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0008);
+		fsm_mutex_lock();
+		ret = fs1818_start_up(fsm_dev, 0);
+		fsm_mutex_unlock();
 		break;
 
 	case SND_SOC_DAPM_PRE_PMD:
 		log_info(fsm_dev->dev, "DAC PRE_PMD");
-		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0001);
-		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0x0000);
+		fsm_mutex_lock();
+		ret = fs1818_shut_down(fsm_dev, 0);
+		fsm_mutex_unlock();
 		break;
 
 	default:
@@ -741,15 +1055,22 @@ static int fsm_dac_feedback_event(struct snd_soc_dapm_widget *widget,
 	}
 	log_debug(fsm_dev->dev, "event:%d", event);
 
+	if (!fsm_dev->dev_init)
+		return 0;
+
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
 		log_info(fsm_dev->dev, "FEEDBACK PRE_PMU");
-		ret = fsm_set_bf(fsm_dev, FS1818_I2SDOE, 1);
+		fsm_mutex_lock();
+		ret = fs1818_feedback_event(fsm_dev, true);
+		fsm_mutex_unlock();
 		break;
 
 	case SND_SOC_DAPM_PRE_PMD:
 		log_info(fsm_dev->dev, "FEEDBACK PRE_PMD");
-		ret = fsm_set_bf(fsm_dev, FS1818_I2SDOE, 0);
+		fsm_mutex_lock();
+		ret = fs1818_feedback_event(fsm_dev, false);
+		fsm_mutex_unlock();
 		break;
 	default:
 		break;
@@ -777,28 +1098,24 @@ static int fsm_amp_switch_put(struct snd_kcontrol *kcontrol,
 {
 	struct fsm_dev *fsm_dev = fsm_get_drvdata_from_kctrl(kcontrol);
 	int enable;
-	int ret;
+	int ret = 0;
 
 	if (fsm_dev == NULL) {
 		pr_err("fsm_dev is null");
 		return -EINVAL;
 	}
 	enable = (int)ucontrol->value.integer.value[0];
+	fsm_mutex_lock();
 	if (enable && !fsm_dev->amp_on) {
-		ret  = fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0x000B);
-		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0008);
-		fsm_delay_ms(20);
-		ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_DACCTRL), 0x0210);
+		ret = fs1818_start_up(fsm_dev, 1);
 		fsm_dev->amp_on = true;
 		fsm_set_monitor(fsm_dev, true);
 	} else if (!enable && fsm_dev->amp_on) {
 		fsm_dev->amp_on = false;
 		fsm_set_monitor(fsm_dev, false);
-		ret  = fsm_snd_soc_write(fsm_dev, REG(FS1818_DACCTRL), 0x0310);
-		fsm_delay_ms(20);
-		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0001);
-		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0x0000);
+		ret = fs1818_shut_down(fsm_dev, 1);
 	}
+	fsm_mutex_unlock();
 
 	return ret;
 }
@@ -807,53 +1124,37 @@ static int fsm_boost_mode_get(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
 	struct fsm_dev *fsm_dev = fsm_get_drvdata_from_kctrl(kcontrol);
-	uint16_t val = 0;
-	int ret;
 
 	if (fsm_dev == NULL) {
 		pr_err("fsm_dev is null");
 		return -EINVAL;
 	}
-	ret = fsm_snd_soc_read(fsm_dev, REG(FS1818_BSTCTRL), &val);
-	if (!get_bf_val(FS1818_BSTEN, val)) {
-		/* Boost disabled */
-		ucontrol->value.integer.value[0] = 0;
-		return ret;
-	}
-	val = get_bf_val(FS1818_BST_MODE, val);
-	if (val == 0)
-		val = 3; /* Follow mode */
+	ucontrol->value.integer.value[0] = fsm_dev->hw_params.boost_mode;
 
-	ucontrol->value.integer.value[0] = val;
-
-	return ret;
+	return 0;
 }
 
 static int fsm_boost_mode_put(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
 	struct fsm_dev *fsm_dev = fsm_get_drvdata_from_kctrl(kcontrol);
-	uint16_t bstctrl;
-	int value;
+	int mode;
 	int ret;
 
 	if (fsm_dev == NULL) {
 		pr_err("fsm_dev is null");
 		return -EINVAL;
 	}
-	ret = fsm_snd_soc_read(fsm_dev, REG(FS1818_BSTCTRL), &bstctrl);
-	value = (int)ucontrol->value.integer.value[0];
-	if (value == 0) {
-		/* Boost disable */
-		set_bf_val(&bstctrl, FS1818_BSTEN, 0);
-		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
-		return ret;
+	mode = (int)ucontrol->value.integer.value[0];
+	if (mode < 0 || mode > 3) {
+		log_err(fsm_dev->dev, "invalid mode:%d", mode);
+		return -EINVAL;
 	}
-
-	set_bf_val(&bstctrl, FS1818_BST_MODE, value);
-	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
-	set_bf_val(&bstctrl, FS1818_BSTEN, 1);
-	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+	fsm_mutex_lock();
+	ret = fs1818_set_boost_mode(fsm_dev, mode);
+	fsm_mutex_unlock();
+	if (ret)
+		log_err(fsm_dev->dev, "set mode:%d fail:%d", mode, ret);
 
 	return ret;
 }
@@ -869,7 +1170,9 @@ static int fsm_i2s_format_get(struct snd_kcontrol *kcontrol,
 		pr_err("fsm_dev is null");
 		return -EINVAL;
 	}
+	fsm_mutex_lock();
 	ret = fsm_get_bf(fsm_dev, FS1818_I2SF, &val);
+	fsm_mutex_unlock();
 	switch (val) {
 	case 2: // MSB
 		val = 0;
@@ -927,7 +1230,9 @@ static int fsm_i2s_format_put(struct snd_kcontrol *kcontrol,
 		val = 3;
 		break;
 	}
+	fsm_mutex_lock();
 	ret = fsm_set_bf(fsm_dev, FS1818_I2SF, val);
+	fsm_mutex_unlock();
 
 	return ret;
 }
@@ -943,7 +1248,9 @@ static int fsm_i2s_channel_get(struct snd_kcontrol *kcontrol,
 		pr_err("fsm_dev is null");
 		return -EINVAL;
 	}
+	fsm_mutex_lock();
 	ret = fsm_get_bf(fsm_dev, FS1818_CHS12, &val);
+	fsm_mutex_unlock();
 	if (val <= 1) {
 		/* left: 0 or 1 */
 		ucontrol->value.integer.value[0] = 0;
@@ -966,7 +1273,9 @@ static int fsm_i2s_channel_put(struct snd_kcontrol *kcontrol,
 		return -EINVAL;
 	}
 	val = (int)ucontrol->value.integer.value[0] + 1;
+	fsm_mutex_lock();
 	ret = fsm_set_bf(fsm_dev, FS1818_CHS12, val);
+	fsm_mutex_unlock();
 
 	return ret;
 }
@@ -975,31 +1284,21 @@ static int fsm_i2s_out_get(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
 	struct fsm_dev *fsm_dev = fsm_get_drvdata_from_kctrl(kcontrol);
-	uint16_t val = 0;
-	int ret;
 
 	if (fsm_dev == NULL) {
 		pr_err("fsm_dev is null");
 		return -EINVAL;
 	}
-	ret = fsm_get_bf(fsm_dev, FS1818_I2SDOE, &val);
-	if (val == 0) {
-		ucontrol->value.integer.value[0] = val;
-		return ret;
-	}
-	ret |= fsm_get_bf(fsm_dev, FS1818_AECSELL, &val);
-	ucontrol->value.integer.value[0] = val + 1;
+	ucontrol->value.integer.value[0] = fsm_dev->hw_params.do_type;
 
-	return ret;
+	return 0;
 }
 
 static int fsm_i2s_out_put(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
 	struct fsm_dev *fsm_dev = fsm_get_drvdata_from_kctrl(kcontrol);
-	uint16_t i2sctrl;
-	uint16_t i2sset;
-	int aec_sel;
+	int mode;
 	int ret;
 
 	if (fsm_dev == NULL) {
@@ -1009,22 +1308,14 @@ static int fsm_i2s_out_put(struct snd_kcontrol *kcontrol,
 	/* Notice:
 	 * both left and right channel is enabled for mono use case.
 	 */
-	aec_sel = (int)ucontrol->value.integer.value[0];
-	ret = fsm_snd_soc_read(fsm_dev, REG(FS1818_I2SCTRL), &i2sctrl);
-	set_bf_val(&i2sctrl, FS1818_I2SDOE, 0);
-	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_I2SCTRL), i2sctrl);
-	if (aec_sel == 0) {
-		/* Disable i2s output */
+	mode = (int)ucontrol->value.integer.value[0];
+	fsm_mutex_lock();
+	ret = fs1818_set_do_output(fsm_dev, mode);
+	fsm_mutex_unlock();
+	if (ret) {
+		log_err(fsm_dev->dev, "set mode:%d fail:%d", mode, ret);
 		return ret;
 	}
-	aec_sel--; /* match register table */
-	ret |= fsm_snd_soc_read(fsm_dev, REG(FS1818_I2SSET), &i2sset);
-	set_bf_val(&i2sset, FS1818_AECSELL, aec_sel);
-	set_bf_val(&i2sset, FS1818_AECSELR, aec_sel);
-	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_I2SSET), i2sset);
-	set_bf_val(&i2sctrl, FS1818_I2SDOE, 1);
-	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_I2SCTRL), i2sctrl);
-	ret |= fsm_set_bf(fsm_dev, FS1818_I2SDOE, 1);
 
 	return ret;
 }
@@ -1054,16 +1345,16 @@ SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(fsm_bst_mode_txt),
 		fsm_bst_mode_txt);
 
 static const char * const fsm_i2s_out_txt[] = {
-	"OFF", "I2SIN", "AGC_OUT", "AEC_REF"
+	"I2SIN", "AGC_OUT", "AEC_REF"
 };
 
-static const char * const fsm_onoff_switch_txt[] = {
+static const char * const fsm_switch_state_txt[] = {
 	"Off", "On"
 };
 
-static const struct soc_enum fsm_onoff_switch_enum =
-SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(fsm_onoff_switch_txt),
-		fsm_onoff_switch_txt);
+static const struct soc_enum fsm_switch_state_enum =
+SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(fsm_switch_state_txt),
+		fsm_switch_state_txt);
 
 static const struct soc_enum fsm_i2s_out_enum =
 SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(fsm_i2s_out_txt),
@@ -1072,7 +1363,7 @@ SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(fsm_i2s_out_txt),
 static const DECLARE_TLV_DB_SCALE(fsm_volume_tlv, -9690, 38, 0);
 
 static const struct snd_kcontrol_new fsm_snd_controls[] = {
-	SOC_ENUM_EXT("fs18xx_amp_switch", fsm_onoff_switch_enum,
+	SOC_ENUM_EXT("fs18xx_amp_switch", fsm_switch_state_enum,
 			fsm_amp_switch_get, fsm_amp_switch_put),
 	SOC_ENUM_EXT("fs18xx_boost_mode", fsm_bst_mode_enum,
 			fsm_boost_mode_get, fsm_boost_mode_put),
@@ -1080,11 +1371,12 @@ static const struct snd_kcontrol_new fsm_snd_controls[] = {
 			fsm_i2s_format_get, fsm_i2s_format_put),
 	SOC_ENUM_EXT("fs18xx_i2s_channel", fsm_i2s_channel_enum,
 			fsm_i2s_channel_get, fsm_i2s_channel_put),
+	SOC_SINGLE("fs18xx_i2s_out_onoff", REG(FS1818_I2SCTRL), 11, 1, 0),
 	SOC_ENUM_EXT("fs18xx_i2s_out", fsm_i2s_out_enum,
 			fsm_i2s_out_get, fsm_i2s_out_put),
 	SOC_SINGLE("fs18xx_bclk_invert", REG(FS1818_I2SSET), 6, 1, 0),
 	SOC_SINGLE("fs18xx_ws_invert", REG(FS1818_I2SSET), 5, 1, 0),
-	SOC_SINGLE_TLV("fs18xx_volume", REG(FS1818_AUDIOCTRL), 8, 0xF3, 0,
+	SOC_SINGLE_TLV("fs18xx_volume", REG(FS1818_AUDIOCTRL), 8, 0xFF, 0,
 			fsm_volume_tlv),
 	SOC_SINGLE("fs18xx_mute", REG(FS1818_DACCTRL), 8, 1, 0),
 	SOC_SINGLE("fs18xx_fade", REG(FS1818_DACCTRL), 9, 1, 0),
@@ -1133,7 +1425,7 @@ static int fsm_add_widgets(struct snd_soc_codec *codec, struct fsm_dev *fsm_dev)
 
 	memcpy(kctrl_new, fsm_snd_controls,
 			count * sizeof(struct snd_kcontrol_new));
-	if (fsm_dev->dev_name != NULL) {
+	if (fsm_dev->chn_name != NULL) {
 		for (i = 0; i < count; i++) {
 			fsm_append_suffix(fsm_dev,
 					(const char **)&kctrl_new[i].name);
@@ -1206,51 +1498,54 @@ static int fsm_set_sysclk(struct snd_soc_dai *codec_dai,
 	struct fsm_dev *fsm_dev;
 
 	fsm_dev = fsm_get_drvdata_from_dai(codec_dai);
-	if (fsm_dev)
-		log_info(fsm_dev->dev, "sysclk freq:%d", freq);
-	freq_sysclk = freq;
+	if (fsm_dev == NULL) {
+		pr_err("fsm_dev is null");
+		return -EINVAL;
+	}
+	log_info(fsm_dev->dev, "sysclk freq:%d", freq);
+	fsm_dev->hw_params.freq_bclk = freq;
+
 	return 0;
 }
 
 static int fsm_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 {
 	struct fsm_dev *fsm_dev;
+	int ret;
 
 	fsm_dev = fsm_get_drvdata_from_dai(dai);
-	if (fsm_dev)
-		log_info(fsm_dev->dev, "dai format:0x%X", fmt);
 
+	if (fsm_dev == NULL) {
+		pr_err("fsm_dev is null");
+		return -EINVAL;
+	}
+
+	log_info(fsm_dev->dev, "dai format:0x%X", fmt);
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
 	case SND_SOC_DAIFMT_CBS_CFS:
 		break;
 	case SND_SOC_DAIFMT_CBM_CFM:
 	default:
 		// only supports Slave mode
-		pr_err("invalid DAI master/slave interface");
+		log_err(fsm_dev->dev, "invalid DAI master/slave interface");
 		return -EINVAL;
 	}
 
-	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
-	case SND_SOC_DAIFMT_I2S:
-		break;
-	default:
-		pr_err("invalid dai format:0x%X", fmt);
-		return -EINVAL;
-	}
+	fsm_mutex_lock();
+	fsm_dev->hw_params.dai_fmt = fmt & SND_SOC_DAIFMT_FORMAT_MASK;
+	ret = fs1818_set_fmt(fsm_dev, fmt);
+	fsm_mutex_unlock();
 
-	return 0;
+	return ret;
 }
 
 static int fsm_hw_params(struct snd_pcm_substream *substream,
 		struct snd_pcm_hw_params *params, struct snd_soc_dai *dai)
 {
+	struct fsm_hw_params *fsm_params;
 	struct fsm_dev *fsm_dev;
-	int bit_width;
-	int format;
-	int srate;
-	int bclk;
+	unsigned int format;
 	int ret;
-	int i2ssr = 0;
 
 	fsm_dev = fsm_get_drvdata_from_dai(dai);
 	if (fsm_dev == NULL) {
@@ -1258,54 +1553,75 @@ static int fsm_hw_params(struct snd_pcm_substream *substream,
 		return -EINVAL;
 	}
 
+	fsm_params = &fsm_dev->hw_params;
 	format = params_format(params);
 	switch (format) {
 	case SNDRV_PCM_FORMAT_S24_LE:
-	case SNDRV_PCM_FORMAT_S24_3LE:
 	case SNDRV_PCM_FORMAT_S32_LE:
-		bit_width = 32;
+		fsm_params->bit_width = 32;
+		break;
+	case SNDRV_PCM_FORMAT_S24_3LE:
+		fsm_params->bit_width = 24;
 		break;
 	case SNDRV_PCM_FORMAT_S16_LE:
-	default:
-		bit_width = 16;
+		fsm_params->bit_width = 16;
 		break;
+	default:
+		log_err(fsm_dev->dev, "invalid pcm format:%X", format);
+		return -EINVAL;
 	}
-	srate = params_rate(params);
+	fsm_params->sample_rate = params_rate(params);
 	log_debug(fsm_dev->dev,
-		"pcm_format:%d, rate:%d, sample size:%d, physical size:%d",
-		format, srate, snd_pcm_format_width(format),
+		"pcm format:%d, rate:%d, width:%d & %d", format,
+		fsm_params->sample_rate,
+		snd_pcm_format_width(format),
 		snd_pcm_format_physical_width(format));
-	bclk = freq_sysclk;
-	if (bclk == 0) {
-		/* mi2s has two channels */
-		bclk = srate * bit_width * 2;
+
+	if (params_channels(params) <= 2)
+		fsm_params->channel = 2;
+	else {
+		log_err(fsm_dev->dev, "invalid channel:%d", params_channels(params));
+		return -EINVAL;
 	}
 
-	switch (srate) {
-	case 8000:
-		i2ssr = 0;
+	fsm_params->freq_bclk = fsm_params->sample_rate \
+		* fsm_params->bit_width \
+		* fsm_params->channel;
+	if (fsm_params->sample_rate == 32000)
+		fsm_params->freq_bclk += 32;
+
+	switch (fsm_params->dai_fmt) {
+	case SND_SOC_DAIFMT_I2S:
+		fsm_params->i2s_fmt = 3;
 		break;
-	case 16000:
-		i2ssr = 3;
+	case SND_SOC_DAIFMT_RIGHT_J:
+		if (fsm_params->bit_width == 16)
+			fsm_params->i2s_fmt = 4;
+		else
+			fsm_params->i2s_fmt = 7;
 		break;
-	case 44100:
-		i2ssr = 7;
+	case SND_SOC_DAIFMT_LEFT_J:
+		fsm_params->i2s_fmt = 2;
 		break;
-	case 32000:
-		bclk += 32;
-	case 48000:
 	default:
-		i2ssr = 8;
-		break;
+		log_err(fsm_dev->dev, "invalid dai format:%X", fsm_params->dai_fmt);
+		return -EINVAL;
 	}
 
-	// config pll need disable pll firstly
-	ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0);
-	ret |= fsm_set_bf(fsm_dev, FS1818_I2SSR, i2ssr);
-	ret |= fs1818_compat_32k_srate(fsm_dev, srate);
-	ret |= fs1818_config_pll(fsm_dev, bclk);
-	log_info(fsm_dev->dev, "sample rate:%d, chn:%d, bit_width:%d, bclk:%d",
-		srate, params_channels(params), bit_width, bclk);
+	log_info(fsm_dev->dev, "rate:%d, chn:%d, width:%d, bclk:%d",
+		fsm_params->sample_rate,
+		fsm_params->channel,
+		fsm_params->bit_width,
+		fsm_params->freq_bclk);
+
+	if (substream->stream != SNDRV_PCM_STREAM_PLAYBACK) {
+		log_info(fsm_dev->dev, "capture stream");
+		return 0;
+	}
+
+	fsm_mutex_lock();
+	ret = fs1818_hw_params(fsm_dev);
+	fsm_mutex_unlock();
 
 	return ret;
 }
@@ -1326,19 +1642,12 @@ static int fsm_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 		return 0;
 	}
 
+	log_info(fsm_dev->dev, "playback %s", (mute) ? "mute" : "unmute");
+	fsm_mutex_lock();
 	fsm_dev->amp_on = !mute;
-	if (mute) {
-		/* playback mute */
-		log_info(fsm_dev->dev, "playback mute");
-		fsm_set_monitor(fsm_dev, false);
-		ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_DACCTRL), 0x0310);
-		fsm_delay_ms(20);
-	} else {
-		/* playback unmute */
-		log_info(fsm_dev->dev, "playback unmute");
-		ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_DACCTRL), 0x0210);
-		fsm_set_monitor(fsm_dev, true);
-	}
+	fsm_set_monitor(fsm_dev, (fsm_dev->amp_on) ? true : false);
+	ret = fs1818_set_mute(fsm_dev, mute);
+	fsm_mutex_unlock();
 
 	return ret;
 }
@@ -1379,7 +1688,7 @@ static ssize_t fsm_montr_en_show(struct class *class,
 		return -EINVAL;
 	}
 
-	return scnprintf(buf, PAGE_SIZE, "montr_en: %d\n",
+	return scnprintf(buf, PAGE_SIZE, "montr_en:%d\n",
 			fsm_dev->montr_en);
 }
 
@@ -1510,14 +1819,17 @@ static int fsm_codec_probe(struct snd_soc_codec *codec)
 		return -EINVAL;
 	}
 
-	log_info(fsm_dev->dev, "dev_name: %s", dev_name(codec->dev));
+	log_debug(fsm_dev->dev, "dev_name: %s", dev_name(codec->dev));
 	fsm_dev->codec = codec;
+	fsm_mutex_lock();
+	ret = fs1818_dev_init(fsm_dev);
+	fsm_mutex_unlock();
+	if (ret) {
+		log_err(fsm_dev->dev, "init fail:%d", ret);
+		return ret;
+	}
 	ret = fsm_add_widgets(codec, fsm_dev);
-	ret |= fs1818_dev_init(fsm_dev);
-	if (ret)
-		log_err(fsm_dev->dev, "probe fail:%d", ret);
-	else
-		log_info(fsm_dev->dev, "done");
+	log_info(fsm_dev->dev, "%s!", ret ? "fail" : "done");
 
 	return ret;
 }
@@ -1583,9 +1895,32 @@ static int fsm_parse_dts(struct i2c_client *i2c, struct fsm_dev *fsm_dev)
 		return -EINVAL;
 	}
 
-	ret = of_property_read_string(np, "fsm,channel", &fsm_dev->dev_name);
+	ret = of_property_read_string(np, "fsm,channel_name",
+		&fsm_dev->chn_name);
 	if (ret)
-		fsm_dev->dev_name = NULL;
+		fsm_dev->chn_name = NULL;
+
+	ret = of_property_read_u8(np, "fsm,digital_volume",
+		&fsm_dev->digi_vol);
+	if (ret)
+		fsm_dev->digi_vol = 0xF3;
+
+	ret = of_property_read_bool(np, "fsm,monitor_enable");
+	if (!ret)
+		fsm_dev->montr_en = false;
+
+	ret = of_property_read_u8(np, "fsm,monitor_period",
+		&fsm_dev->montr_pd);
+	if (ret)
+		fsm_dev->montr_pd = 2;
+
+	if (fsm_dev->montr_pd == 0)
+		fsm_dev->montr_pd = 1;
+
+	log_info(fsm_dev->dev, "chn name: %s, volume: 0x%X",
+		fsm_dev->chn_name, fsm_dev->digi_vol);
+	log_info(fsm_dev->dev, "monitor enable: %d, period: %d",
+		fsm_dev->montr_en, fsm_dev->montr_pd);
 
 	return 0;
 }
@@ -1614,11 +1949,11 @@ static int fsm_detect_device(struct fsm_dev *fsm_dev, uint8_t addr)
 		fsm_dev->use_irq = false;
 		break;
 	default:
-		log_err(fsm_dev->dev, "invalid id:%04X", id);
+		log_err(fsm_dev->dev, "Invalid ID:%04X", id);
 		return -EINVAL;
 	}
 	fsm_dev->version = id;
-	log_info(fsm_dev->dev, "Found DEVICE@%02X:%04X", addr, id);
+	log_info(fsm_dev->dev, "Found DEVICE:%04X", id);
 
 	return 0;
 }
@@ -1626,6 +1961,7 @@ static int fsm_detect_device(struct fsm_dev *fsm_dev, uint8_t addr)
 static int fsm_i2c_probe(struct i2c_client *i2c,
 		const struct i2c_device_id *id)
 {
+	struct fsm_hw_params *fsm_params;
 	struct fsm_dev *fsm_dev;
 	int ret;
 
@@ -1643,8 +1979,22 @@ static int fsm_i2c_probe(struct i2c_client *i2c,
 	mutex_init(&fsm_dev->i2c_lock);
 	fsm_dev->i2c = i2c;
 	fsm_dev->dev = &i2c->dev;
-	fsm_dev->montr_en = true;
 	fsm_dev->amp_on = false;
+	fsm_dev->montr_en = true;
+	fsm_dev->montr_pd = 2;
+	fsm_dev->digi_vol = 0xF3;
+	fsm_dev->chn_name = NULL;
+
+	fsm_params = &fsm_dev->hw_params;
+	fsm_params->dai_fmt = SND_SOC_DAIFMT_I2S;
+	fsm_params->i2s_fmt = 3; // I2S
+	fsm_params->boost_mode = 2; // ADP mode
+	fsm_params->do_type = 2; // AEC
+	fsm_params->do_enable = 0; // Disable
+	fsm_params->sample_rate = 48000;
+	fsm_params->bit_width = 16;
+	fsm_params->channel = 2;
+	fsm_params->freq_bclk = 1536000;
 
 #ifdef CONFIG_OF
 	ret = fsm_parse_dts(i2c, fsm_dev);
@@ -1731,9 +2081,10 @@ static struct i2c_driver fsm_i2c_driver = {
 	.id_table = fsm_i2c_id,
 };
 
-/* For MTK platfom start */
+#ifdef CONFIG_MEDIATEK_SOLUTION
+/* For mtk speaker amp driver */
 int exfsm_i2c_probe(struct i2c_client *i2c,
-			const struct i2c_device_id *id)
+		const struct i2c_device_id *id)
 {
 	return fsm_i2c_probe(i2c, id);
 }
@@ -1750,7 +2101,7 @@ void exfsm_i2c_shutdown(struct i2c_client *i2c)
 	fsm_i2c_shutdown(i2c);
 }
 EXPORT_SYMBOL(exfsm_i2c_shutdown);
-/* For MTK platfom end */
+#endif
 
 static int __init fsm_i2c_init(void)
 {
