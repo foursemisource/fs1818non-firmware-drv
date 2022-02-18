@@ -756,9 +756,7 @@ static int fs1818_hw_params(struct fsm_dev *fsm_dev)
 			fsm_params->sample_rate);
 		return -EINVAL;
 	}
-	// config pll need disable pll firstly
-	ret  = fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0);
-	ret |= fsm_snd_soc_read(fsm_dev, REG(FS1818_I2SCTRL), &i2sctrl);
+	ret = fsm_snd_soc_read(fsm_dev, REG(FS1818_I2SCTRL), &i2sctrl);
 	set_bf_val(&i2sctrl, FS1818_I2SSR, i2ssr);
 	set_bf_val(&i2sctrl, FS1818_I2SF, fsm_params->i2s_fmt);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_I2SCTRL), i2sctrl);
@@ -908,6 +906,7 @@ static int fs1818_start_up(struct fsm_dev *fsm_dev, int unmute)
 
 static int fs1818_shut_down(struct fsm_dev *fsm_dev, int mute)
 {
+	uint16_t digstat;
 	int ret;
 
 	if (!fsm_dev->dev_init)
@@ -919,6 +918,10 @@ static int fs1818_shut_down(struct fsm_dev *fsm_dev, int mute)
 	ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0001);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0x0000);
 	fsm_dev->start_up = false;
+	/* check dac run or not(DIGSTAT_BDh_bit1) */
+	ret |= fsm_read_status(fsm_dev, 0xBD, &digstat);
+	if (get_bf_val(0x01BD, digstat)) /* DIGSTAT_BDh_bit1 == 1 */
+		fsm_delay_ms(20);
 
 	return ret;
 }
@@ -1620,7 +1623,12 @@ static int fsm_hw_params(struct snd_pcm_substream *substream,
 	}
 
 	fsm_mutex_lock();
-	ret = fs1818_hw_params(fsm_dev);
+	if (fsm_dev->start_up) {
+		ret = fs1818_shut_down(fsm_dev, fsm_dev->amp_on);
+		ret |= fs1818_hw_params(fsm_dev);
+		ret |= fs1818_start_up(fsm_dev, fsm_dev->amp_on);
+	} else
+		ret = fs1818_hw_params(fsm_dev);
 	fsm_mutex_unlock();
 
 	return ret;
