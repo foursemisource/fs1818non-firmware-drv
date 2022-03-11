@@ -1911,7 +1911,7 @@ static int fsm_parse_dts(struct i2c_client *i2c, struct fsm_dev *fsm_dev)
 	ret = of_property_read_u8(np, "fsm,digital_volume",
 		&fsm_dev->digi_vol);
 	if (ret)
-		fsm_dev->digi_vol = 0xF3;
+		fsm_dev->digi_vol = 0xF4;
 
 	ret = of_property_read_bool(np, "fsm,monitor_enable");
 	if (!ret)
@@ -1990,7 +1990,7 @@ static int fsm_i2c_probe(struct i2c_client *i2c,
 	fsm_dev->amp_on = false;
 	fsm_dev->montr_en = true;
 	fsm_dev->montr_pd = 2;
-	fsm_dev->digi_vol = 0xF3;
+	fsm_dev->digi_vol = 0xF4;
 	fsm_dev->chn_name = NULL;
 
 	fsm_params = &fsm_dev->hw_params;
