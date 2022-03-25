@@ -231,7 +231,7 @@ static int fsm_snd_soc_read(struct fsm_dev *fsm_dev, uint8_t reg, uint16_t *val)
 //	}
 #endif
 	*val = (ret ? 0 : (uint16_t)value);
-	log_debug(fsm_dev->dev, "%02X:%02X->%04X", fsm_dev->addr, reg, *val);
+	dev_dbg(fsm_dev->dev, "R: %02X %04X\n", reg, *val);
 
 	return ret;
 }
@@ -252,7 +252,7 @@ static int fsm_snd_soc_write(struct fsm_dev *fsm_dev, uint8_t reg, uint16_t val)
 	ret = fsm_i2c_reg_write(fsm_dev, reg, val);
 	// ret = snd_soc_write(fsm_dev->codec, reg, val);
 #endif
-	log_debug(fsm_dev->dev, "%02X:%02X<-%04X", fsm_dev->addr, reg, val);
+	dev_dbg(fsm_dev->dev, "W: %02X %04X\n", reg, val);
 
 	return ret;
 }
@@ -558,6 +558,26 @@ static int fs1818_compat_32k_srate(struct fsm_dev *fsm_dev, int srate)
 	return ret;
 }
 
+static int fs1818_wait_boost(struct fsm_dev *fsm_dev, bool on)
+{
+	uint16_t val;
+	int i = 0;
+	int ret;
+
+	fsm_delay_ms(5);
+	while (i++ < 20) {
+		fsm_delay_ms(2);
+		ret = fsm_read_status(fsm_dev, REG(FS1818_BSTCTRL), &val);
+		if (on && get_bf_val(FS1818_SSEND, val))
+			return ret;
+		else if (!on && !get_bf_val(FS1818_SSEND, val))
+			return ret;
+	}
+	log_info(fsm_dev->dev, "wait boost %s timeout!", on ? "on" : "off");
+
+	return ret;
+}
+
 static int fs1818_config_pll(struct fsm_dev *fsm_dev, int bclk)
 {
 	int idx;
@@ -596,7 +616,7 @@ static int fs1818_power_on(struct fsm_dev *fsm_dev)
 		return 0;
 
 	ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0008);
-	fsm_delay_ms(20);
+	fs1818_wait_boost(fsm_dev, true);
 
 	return ret;
 }
@@ -609,10 +629,57 @@ static int fs1818_power_off(struct fsm_dev *fsm_dev)
 		return 0;
 
 	ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0001);
-	fsm_delay_ms(20);
+	fs1818_wait_boost(fsm_dev, false);
 
 	return ret;
 }
+
+static int fs1818_set_boost_voltage(struct fsm_dev *fsm_dev, int bst_volt)
+{
+	uint16_t bstctrl;
+	int ret;
+
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	ret = fsm_read_status(fsm_dev, REG(FS1818_BSTCTRL), &bstctrl);
+	set_bf_val(&bstctrl, FS1818_BSTEN, 0);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+	if (get_bf_val(FS1818_SSEND, bstctrl))
+		fs1818_wait_boost(fsm_dev, false);
+	set_bf_val(&bstctrl, FS1818_VOUT_SEL, bst_volt);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+	set_bf_val(&bstctrl, FS1818_BSTEN, 1);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+
+	fsm_dev->hw_params.boost_voltage = bst_volt;
+
+	return ret;
+}
+
+static int fs1818_set_boost_current(struct fsm_dev *fsm_dev, int bst_curr)
+{
+	uint16_t bstctrl;
+	int ret;
+
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	ret = fsm_read_status(fsm_dev, REG(FS1818_BSTCTRL), &bstctrl);
+	set_bf_val(&bstctrl, FS1818_BSTEN, 0);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+	if (get_bf_val(FS1818_SSEND, bstctrl))
+		fs1818_wait_boost(fsm_dev, false);
+	set_bf_val(&bstctrl, FS1818_ILIM_SEL, bst_curr);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+	set_bf_val(&bstctrl, FS1818_BSTEN, 1);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+
+	fsm_dev->hw_params.boost_current = bst_curr;
+
+	return ret;
+}
+
 
 static int fs1818_set_boost_mode(struct fsm_dev *fsm_dev, int mode)
 {
@@ -626,7 +693,8 @@ static int fs1818_set_boost_mode(struct fsm_dev *fsm_dev, int mode)
 	/* Boost disable */
 	set_bf_val(&bstctrl, FS1818_BSTEN, 0);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
-	fsm_delay_ms(20);
+	if (get_bf_val(FS1818_SSEND, bstctrl))
+		fs1818_wait_boost(fsm_dev, false);
 	if (mode > 0) {
 		set_bf_val(&bstctrl, FS1818_BST_MODE, mode);
 		ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
@@ -637,6 +705,30 @@ static int fs1818_set_boost_mode(struct fsm_dev *fsm_dev, int mode)
 
 	return ret;
 }
+
+static int fs1818_set_dac_gain(struct fsm_dev *fsm_dev, int dac_gain)
+{
+	uint16_t bstctrl;
+	int ret;
+
+	if (!fsm_dev->dev_init)
+		return 0;
+
+	ret = fsm_read_status(fsm_dev, REG(FS1818_BSTCTRL), &bstctrl);
+	set_bf_val(&bstctrl, FS1818_BSTEN, 0);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+	if (get_bf_val(FS1818_SSEND, bstctrl))
+		fs1818_wait_boost(fsm_dev, false);
+	set_bf_val(&bstctrl, FS1818_DAC_GAIN, dac_gain);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+	set_bf_val(&bstctrl, FS1818_BSTEN, 1);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), bstctrl);
+
+	fsm_dev->hw_params.dac_gain = dac_gain;
+
+	return ret;
+}
+
 
 static int fs1818_set_do_output(struct fsm_dev *fsm_dev, int mode)
 {
@@ -852,6 +944,7 @@ static int fs1818_dev_init(struct fsm_dev *fsm_dev)
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_AUDIOCTRL), val);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_DSPCTRL), 0x0802);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_DACCTRL), 0x0310);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_TSCTRL), 0x6623);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_MODCTRL), 0x800A);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), 0x19AE);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_OTPACC), 0xCA91);
@@ -897,7 +990,7 @@ static int fs1818_start_up(struct fsm_dev *fsm_dev, int unmute)
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0008);
 	fsm_dev->start_up = true;
 	if (unmute) {
-		fsm_delay_ms(20);
+		fs1818_wait_boost(fsm_dev, true);
 		ret |= fs1818_set_mute(fsm_dev, false);
 	}
 
@@ -906,7 +999,6 @@ static int fs1818_start_up(struct fsm_dev *fsm_dev, int unmute)
 
 static int fs1818_shut_down(struct fsm_dev *fsm_dev, int mute)
 {
-	uint16_t digstat;
 	int ret;
 
 	if (!fsm_dev->dev_init)
@@ -918,17 +1010,13 @@ static int fs1818_shut_down(struct fsm_dev *fsm_dev, int mute)
 	ret = fsm_snd_soc_write(fsm_dev, REG(FS1818_SYSCTRL), 0x0001);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_PLLCTRL4), 0x0000);
 	fsm_dev->start_up = false;
-	/* check dac run or not(DIGSTAT_BDh_bit1) */
-	ret |= fsm_read_status(fsm_dev, 0xBD, &digstat);
-	if (get_bf_val(0x01BD, digstat)) /* DIGSTAT_BDh_bit1 == 1 */
-		fsm_delay_ms(20);
+	fs1818_wait_boost(fsm_dev, false);
 
 	return ret;
 }
 
 static int fsm_set_monitor(struct fsm_dev *fsm_dev, bool enable)
 {
-
 	if (fsm_dev == NULL || fsm_dev->fsm_wq == NULL)
 		return -EINVAL;
 
@@ -957,7 +1045,7 @@ static void fsm_work_monitor(struct work_struct *work)
 		pr_err("fsm_dev is null");
 		return;
 	}
-	log_info(fsm_dev->dev, "status monitoring");
+	log_debug(fsm_dev->dev, "status monitoring");
 
 	fsm_mutex_lock();
 	ret = fsm_read_status(fsm_dev, REG(FS1818_STATUS), &val);
@@ -1123,6 +1211,114 @@ static int fsm_amp_switch_put(struct snd_kcontrol *kcontrol,
 	return ret;
 }
 
+static int fsm_boost_voltage_get(struct snd_kcontrol *kcontrol,
+		struct snd_ctl_elem_value *ucontrol)
+{
+	struct fsm_dev *fsm_dev = fsm_get_drvdata_from_kctrl(kcontrol);
+	uint16_t val;
+	int ret;
+
+	if (fsm_dev == NULL) {
+		pr_err("fsm_dev is null");
+		return -EINVAL;
+	}
+
+	fsm_mutex_lock();
+	ret = fsm_read_status(fsm_dev, REG(FS1818_BSTCTRL), &val);
+	fsm_mutex_unlock();
+
+	val = get_bf_val(FS1818_VOUT_SEL, val);
+	if (val < 0 || val > 6) {
+		log_err(fsm_dev->dev, "invalid boost voltage:%d", val);
+		return -EINVAL;
+	}
+
+	ucontrol->value.integer.value[0] = val;
+
+	return 0;
+}
+
+static int fsm_boost_voltage_put(struct snd_kcontrol *kcontrol,
+		struct snd_ctl_elem_value *ucontrol)
+{
+	struct fsm_dev *fsm_dev = fsm_get_drvdata_from_kctrl(kcontrol);
+	int val;
+	int ret;
+
+	if (fsm_dev == NULL) {
+		pr_err("fsm_dev is null");
+		return -EINVAL;
+	}
+
+	val = (int)ucontrol->value.integer.value[0];
+	if (val < 0 || val > 6) {
+		log_err(fsm_dev->dev, "invalid boost voltage:%d", val);
+		return -EINVAL;
+	}
+
+	fsm_mutex_lock();
+	ret = fs1818_set_boost_voltage(fsm_dev, val);
+	fsm_mutex_unlock();
+	if (ret)
+		log_err(fsm_dev->dev, "set boost voltage:%d fail:%d", val, ret);
+
+	return ret;
+}
+
+static int fsm_boost_current_get(struct snd_kcontrol *kcontrol,
+		struct snd_ctl_elem_value *ucontrol)
+{
+	struct fsm_dev *fsm_dev = fsm_get_drvdata_from_kctrl(kcontrol);
+	uint16_t val;
+	int ret;
+
+	if (fsm_dev == NULL) {
+		pr_err("fsm_dev is null");
+		return -EINVAL;
+	}
+
+	fsm_mutex_lock();
+	ret = fsm_read_status(fsm_dev, REG(FS1818_BSTCTRL), &val);
+	fsm_mutex_unlock();
+
+	val = get_bf_val(FS1818_ILIM_SEL, val);
+	if (val < 0 || val > 7) {
+		log_err(fsm_dev->dev, "invalid boost current:%d", val);
+		return -EINVAL;
+	}
+
+	ucontrol->value.integer.value[0] = val;
+
+	return 0;
+}
+
+static int fsm_boost_current_put(struct snd_kcontrol *kcontrol,
+		struct snd_ctl_elem_value *ucontrol)
+{
+	struct fsm_dev *fsm_dev = fsm_get_drvdata_from_kctrl(kcontrol);
+	int val;
+	int ret;
+
+	if (fsm_dev == NULL) {
+		pr_err("fsm_dev is null");
+		return -EINVAL;
+	}
+
+	val = (int)ucontrol->value.integer.value[0];
+	if (val < 0 || val > 7) {
+		log_err(fsm_dev->dev, "invalid boost current:%d", val);
+		return -EINVAL;
+	}
+
+	fsm_mutex_lock();
+	ret = fs1818_set_boost_current(fsm_dev, val);
+	fsm_mutex_unlock();
+	if (ret)
+		log_err(fsm_dev->dev, "set boost current:%d fail:%d", val, ret);
+
+	return ret;
+}
+
 static int fsm_boost_mode_get(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
@@ -1158,6 +1354,60 @@ static int fsm_boost_mode_put(struct snd_kcontrol *kcontrol,
 	fsm_mutex_unlock();
 	if (ret)
 		log_err(fsm_dev->dev, "set mode:%d fail:%d", mode, ret);
+
+	return ret;
+}
+
+static int fsm_dac_gain_get(struct snd_kcontrol *kcontrol,
+		struct snd_ctl_elem_value *ucontrol)
+{
+	struct fsm_dev *fsm_dev = fsm_get_drvdata_from_kctrl(kcontrol);
+	uint16_t val;
+	int ret;
+
+	if (fsm_dev == NULL) {
+		pr_err("fsm_dev is null");
+		return -EINVAL;
+	}
+
+	fsm_mutex_lock();
+	ret = fsm_read_status(fsm_dev, REG(FS1818_BSTCTRL), &val);
+	fsm_mutex_unlock();
+
+	val = get_bf_val(FS1818_DAC_GAIN, val);
+	if (val < 0 || val > 3) {
+		log_err(fsm_dev->dev, "invalid dac gain:%d", val);
+		return -EINVAL;
+	}
+
+	ucontrol->value.integer.value[0] = val;
+
+	return 0;
+}
+
+static int fsm_dac_gain_put(struct snd_kcontrol *kcontrol,
+		struct snd_ctl_elem_value *ucontrol)
+{
+	struct fsm_dev *fsm_dev = fsm_get_drvdata_from_kctrl(kcontrol);
+	int val;
+	int ret;
+
+	if (fsm_dev == NULL) {
+		pr_err("fsm_dev is null");
+		return -EINVAL;
+	}
+
+	val = (int)ucontrol->value.integer.value[0];
+	if (val < 0 || val > 3) {
+		log_err(fsm_dev->dev, "invalid dac gain:%d", val);
+		return -EINVAL;
+	}
+
+	fsm_mutex_lock();
+	ret = fs1818_set_dac_gain(fsm_dev, val);
+	fsm_mutex_unlock();
+	if (ret)
+		log_err(fsm_dev->dev, "set dac_gain:%d fail:%d", val, ret);
 
 	return ret;
 }
@@ -1339,13 +1589,37 @@ static const struct soc_enum fsm_i2s_channel_enum =
 SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(fsm_i2s_channel_txt),
 		fsm_i2s_channel_txt);
 
+static const char * const fsm_bst_voltage_txt[] = {
+	"5.5V", "5.6V", "5.7V", "5.8V", "5.9V", "6.0V", "6.1V"
+};
+
+static const char * const fsm_bst_current_txt[] = {
+	"1.4A", "1.6A", "1.8A", "2.0A", "2.2A", "2.4A", "2.6A", "2.8A"
+};
+
 static const char * const fsm_bst_mode_txt[] = {
 	"Disable", "Boost", "Adaptive", "Follow"
 };
 
+static const char * const fsm_dac_gain_txt[] = {
+	"0dB", "7.1dB", "10.4dB", "16.5dB"
+};
+
+static const struct soc_enum fsm_bst_voltage_enum =
+SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(fsm_bst_voltage_txt),
+		fsm_bst_voltage_txt);
+
+static const struct soc_enum fsm_bst_current_enum =
+SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(fsm_bst_current_txt),
+		fsm_bst_current_txt);
+
 static const struct soc_enum fsm_bst_mode_enum =
 SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(fsm_bst_mode_txt),
 		fsm_bst_mode_txt);
+
+static const struct soc_enum fsm_dac_gain_enum =
+SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(fsm_dac_gain_txt),
+		fsm_dac_gain_txt);
 
 static const char * const fsm_i2s_out_txt[] = {
 	"I2SIN", "AGC_OUT", "AEC_REF"
@@ -1368,8 +1642,14 @@ static const DECLARE_TLV_DB_SCALE(fsm_volume_tlv, -9690, 38, 0);
 static const struct snd_kcontrol_new fsm_snd_controls[] = {
 	SOC_ENUM_EXT("fs18xx_amp_switch", fsm_switch_state_enum,
 			fsm_amp_switch_get, fsm_amp_switch_put),
+	SOC_ENUM_EXT("fs18xx_boost_voltage", fsm_bst_voltage_enum,
+			fsm_boost_voltage_get, fsm_boost_voltage_put),
+	SOC_ENUM_EXT("fs18xx_boost_current", fsm_bst_current_enum,
+			fsm_boost_current_get, fsm_boost_current_put),
 	SOC_ENUM_EXT("fs18xx_boost_mode", fsm_bst_mode_enum,
 			fsm_boost_mode_get, fsm_boost_mode_put),
+	SOC_ENUM_EXT("fs18xx_dac_gain", fsm_dac_gain_enum,
+			fsm_dac_gain_get, fsm_dac_gain_put),
 	SOC_ENUM_EXT("fs18xx_i2s_format", fsm_i2s_format_enum,
 			fsm_i2s_format_get, fsm_i2s_format_put),
 	SOC_ENUM_EXT("fs18xx_i2s_channel", fsm_i2s_channel_enum,
@@ -1905,13 +2185,9 @@ static int fsm_parse_dts(struct i2c_client *i2c, struct fsm_dev *fsm_dev)
 
 	ret = of_property_read_string(np, "fsm,channel_name",
 		&fsm_dev->chn_name);
-	if (ret)
-		fsm_dev->chn_name = NULL;
 
 	ret = of_property_read_u8(np, "fsm,digital_volume",
 		&fsm_dev->digi_vol);
-	if (ret)
-		fsm_dev->digi_vol = 0xF4;
 
 	ret = of_property_read_bool(np, "fsm,monitor_enable");
 	if (!ret)
@@ -1919,16 +2195,9 @@ static int fsm_parse_dts(struct i2c_client *i2c, struct fsm_dev *fsm_dev)
 
 	ret = of_property_read_u8(np, "fsm,monitor_period",
 		&fsm_dev->montr_pd);
-	if (ret)
-		fsm_dev->montr_pd = 2;
 
 	if (fsm_dev->montr_pd == 0)
 		fsm_dev->montr_pd = 1;
-
-	log_info(fsm_dev->dev, "chn name: %s, volume: 0x%X",
-		fsm_dev->chn_name, fsm_dev->digi_vol);
-	log_info(fsm_dev->dev, "monitor enable: %d, period: %d",
-		fsm_dev->montr_en, fsm_dev->montr_pd);
 
 	return 0;
 }
@@ -1989,14 +2258,17 @@ static int fsm_i2c_probe(struct i2c_client *i2c,
 	fsm_dev->dev = &i2c->dev;
 	fsm_dev->amp_on = false;
 	fsm_dev->montr_en = true;
-	fsm_dev->montr_pd = 2;
-	fsm_dev->digi_vol = 0xF4;
+	fsm_dev->montr_pd = 1; // 1 sec
+	fsm_dev->digi_vol = 0xF4; // -4.125dB
 	fsm_dev->chn_name = NULL;
 
 	fsm_params = &fsm_dev->hw_params;
 	fsm_params->dai_fmt = SND_SOC_DAIFMT_I2S;
 	fsm_params->i2s_fmt = 3; // I2S
+	fsm_params->boost_voltage = 6; // 6.1V
+	fsm_params->boost_current = 6; // 2.6A
 	fsm_params->boost_mode = 2; // ADP mode
+	fsm_params->dac_gain = 3; // 16.5dB
 	fsm_params->do_type = 2; // AEC
 	fsm_params->do_enable = 0; // Disable
 	fsm_params->sample_rate = 48000;
@@ -2008,6 +2280,11 @@ static int fsm_i2c_probe(struct i2c_client *i2c,
 	ret = fsm_parse_dts(i2c, fsm_dev);
 	if (ret)
 		log_err(&i2c->dev, "parse DTS node fail:%d", ret);
+
+	log_info(fsm_dev->dev, "chn name: %s, volume: 0x%X",
+		fsm_dev->chn_name, fsm_dev->digi_vol);
+	log_info(fsm_dev->dev, "monitor enable: %d, period: %d",
+		fsm_dev->montr_en, fsm_dev->montr_pd);
 #endif
 #ifdef CONFIG_REGMAP
 	fsm_dev->regmap = fsm_regmap_i2c_init(i2c);

@@ -16,7 +16,7 @@
 #include <linux/regmap.h>
 
 /* VERSION INFORMATION */
-#define FSM_CODE_VERSION "v3.0.6"
+#define FSM_CODE_VERSION "v3.0.7"
 
 #define FS1818_STATUS         0xF000
 #define FS1818_BOVDS          0x0000
@@ -48,7 +48,10 @@
 #define FS1818_DSPCTRL        0xF0A1
 #define FS1818_DACCTRL        0xF0AE
 #define FS1818_DACMUTE        0x08AE
+#define FS1818_TSCTRL         0xF0AF
 #define FS1818_MODCTRL        0xF0B0
+#define FS1818_DIGSTAT        0xF0BD
+#define FS1818_DACRUN         0x01BD
 #define FS1818_BSTCTRL        0xF0C0
 #define FS1818_DISCHARGE      0x00C0
 #define FS1818_DAC_GAIN       0x11C0
@@ -56,7 +59,7 @@
 #define FS1818_BST_MODE       0x14C0
 #define FS1818_ILIM_SEL       0x36C0
 #define FS1818_VOUT_SEL       0x3AC0
-#define FS1801_SSEND          0x0FC0
+#define FS1818_SSEND          0x0FC0
 #define FS1818_PLLCTRL1       0xF0C1
 #define FS1818_PLLCTRL2       0xF0C2
 #define FS1818_PLLCTRL3       0xF0C3
@@ -64,6 +67,7 @@
 #define FS1818_OTCTRL         0xF0C6
 #define FS1818_ANACTRL        0xF0D0
 #define FS1818_CLDCTRL        0xF0D3
+#define FS1818_REGCTRL        0x08D3
 #define FS1818_AUXCFG         0xF0D7
 #define FS1818_OTPPG1W0       0xF0E4
 
@@ -131,7 +135,10 @@ struct fsm_hw_params {
 	uint16_t i2s_fmt;
 	uint16_t bit_width;
 	uint16_t channel;
+	uint16_t boost_voltage;
+	uint16_t boost_current;
 	uint16_t boost_mode;
+	uint16_t dac_gain;
 	uint16_t do_type;
 	uint16_t do_enable : 1;
 };
