@@ -16,7 +16,7 @@
 #include <linux/regmap.h>
 
 /* VERSION INFORMATION */
-#define FSM_CODE_VERSION "v3.0.7"
+#define FSM_CODE_VERSION "v3.0.8"
 
 #define FS1818_STATUS         0xF000
 #define FS1818_BOVDS          0x0000
@@ -135,8 +135,6 @@ struct fsm_hw_params {
 	uint16_t i2s_fmt;
 	uint16_t bit_width;
 	uint16_t channel;
-	uint16_t boost_voltage;
-	uint16_t boost_current;
 	uint16_t boost_mode;
 	uint16_t dac_gain;
 	uint16_t do_type;
