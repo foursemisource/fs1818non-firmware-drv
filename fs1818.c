@@ -899,7 +899,7 @@ static int fs1818_dev_init(struct fsm_dev *fsm_dev)
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_DACCTRL), 0x0310);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_TSCTRL), 0x6623);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_MODCTRL), 0x800A);
-	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), 0x19AE);
+	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_BSTCTRL), 0x19EE);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_OTPACC), 0xCA91);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_CLDCTRL), 0x0000);
 	ret |= fsm_snd_soc_write(fsm_dev, REG(FS1818_AUXCFG), 0x1020);
